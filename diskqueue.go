@@ -116,6 +116,8 @@ type diskQueue struct {
 	exitChan          dst.Chan[int]
 	exitSyncChan      dst.Chan[int]
 
+	noTruncate0 bool // the benchmark's reuse-file-without-metadata (never set in a normal build)
+
 	logf AppLogFunc
 }
 
@@ -170,7 +172,13 @@ func NewWorld(w *dst.World, opts Options, name string, dataPath string, maxBytes
 		d.logf(ERROR, "DISKQUEUE(%s) failed to retrieveMetaData - %s", d.name, err)
 	}
 	if _, err := d.fsys.Stat(d.metaDataFileName()); errors.Is(err, fs.ErrNotExist) {
-		d.setAsideUnsyncedData()
+		if bug("reuse-file-without-metadata") {
+			// The old behaviour: write over the file in place (bug 5's
+			// truncation would hide this one too, so it is off for file 0).
+			d.noTruncate0 = true
+		} else {
+			d.setAsideUnsyncedData()
+		}
 	}
 
 	w.Go(d.ioLoop)
@@ -249,7 +257,9 @@ func (d *diskQueue) exit(deleted bool) error {
 	if d.writeFile != nil {
 		// Close's sync persists metadata covering everything written:
 		// the data must be durable first.
-		d.writeFile.Sync()
+		if !bug("close-without-fsync") {
+			d.writeFile.Sync()
+		}
 		d.writeFile.Close()
 		d.writeFile = nil
 	}
@@ -375,7 +385,7 @@ func (d *diskQueue) readOne() ([]byte, error) {
 	// The writer may have rolled to a new file after this one was read to
 	// its end while it was still the write file: move on to the next file
 	// instead of reading past the end (which looks like corruption).
-	if d.readFileNum < d.writeFileNum && d.readPos >= d.maxBytesPerFileRead {
+	if d.readFileNum < d.writeFileNum && d.readPos >= d.maxBytesPerFileRead && !bug("read-past-rolled-file") {
 		d.readFile.Close()
 		d.readFile = nil
 		done := d.fileName(d.readFileNum)
@@ -471,7 +481,7 @@ func (d *diskQueue) writeOne(data []byte) error {
 	if d.writeFile == nil {
 		curFileName := d.fileName(d.writeFileNum)
 		flag := os.O_RDWR | os.O_CREATE
-		if d.writePos == 0 {
+		if d.writePos == 0 && !bug("reuse-file-after-read-error") && !(d.noTruncate0 && d.writeFileNum == 0) {
 			// Starting a file: anything already in it was left by a run
 			// that crashed before its metadata covered it (nothing in it
 			// was promised durable). Writing over it in place would leave
@@ -622,6 +632,9 @@ func (d *diskQueue) persistMetaData() error {
 	// atomically rename
 	if err := d.fsys.Rename(tmpFileName, fileName); err != nil {
 		return err
+	}
+	if bug("rename-without-dir-sync") {
+		return nil
 	}
 	return dst.SyncDir(d.fsys, d.dataPath)
 }
