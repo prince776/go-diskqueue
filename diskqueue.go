@@ -244,6 +244,9 @@ func (d *diskQueue) exit(deleted bool) error {
 	}
 
 	if d.writeFile != nil {
+		// Close's sync persists metadata covering everything written:
+		// the data must be durable first.
+		d.writeFile.Sync()
 		d.writeFile.Close()
 		d.writeFile = nil
 	}
