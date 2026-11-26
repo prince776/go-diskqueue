@@ -338,6 +338,23 @@ func (d *diskQueue) readOne() ([]byte, error) {
 		d.reader = bufio.NewReader(d.readFile)
 	}
 
+	// The writer may have rolled to a new file after this one was read to
+	// its end while it was still the write file: move on to the next file
+	// instead of reading past the end (which looks like corruption).
+	if d.readFileNum < d.writeFileNum && d.readPos >= d.maxBytesPerFileRead {
+		d.readFile.Close()
+		d.readFile = nil
+		done := d.fileName(d.readFileNum)
+		d.readFileNum++
+		d.readPos = 0
+		d.nextReadFileNum, d.nextReadPos = d.readFileNum, 0
+		if err := os.Remove(done); err != nil {
+			d.logf(ERROR, "DISKQUEUE(%s) failed to Remove(%s) - %s", d.name, done, err)
+		}
+		d.needSync = true
+		return d.readOne()
+	}
+
 	err = binary.Read(d.reader, binary.BigEndian, &msgSize)
 	if err != nil {
 		d.readFile.Close()
