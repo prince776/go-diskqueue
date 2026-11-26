@@ -557,7 +557,18 @@ func (d *diskQueue) persistMetaData() error {
 	f.Close()
 
 	// atomically rename
-	return os.Rename(tmpFileName, fileName)
+	err = os.Rename(tmpFileName, fileName)
+	if err != nil {
+		return err
+	}
+
+	// the rename is durable only once the directory is synced
+	dir, err := os.Open(d.dataPath)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (d *diskQueue) metaDataFileName() string {
