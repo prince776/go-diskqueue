@@ -182,6 +182,10 @@ func concurrentHarness(h *dsttest.Harness, consumers int, expect ...string) {
 		q := open()
 		current := func() diskqueue.Interface { mu.RLock(); defer mu.RUnlock(); return q }
 
+		// Workload features (swarm testing: each seed picks its pace).
+		bursty := h.Feature("bursty-producers")   // no pause between puts
+		lagging := h.Feature("lagging-consumers") // a backlog builds, across files
+		frequent := h.Feature("frequent-reopens") // clean closes every 20-200ms
 		var wg dst.WaitGroup
 		for p := range producers {
 			wg.Add(1)
@@ -195,7 +199,13 @@ func concurrentHarness(h *dsttest.Harness, consumers int, expect ...string) {
 						m.acked[p][seq] = true
 						m.lastAcked[p] = seq
 					}
-					w.Sleep(time.Duration(r.IntN(15)) * time.Millisecond)
+					if bursty && r.IntN(10) != 0 {
+						w.Sleep(time.Duration(r.IntN(1000)) * time.Microsecond) // in a burst
+					} else if bursty {
+						w.Sleep(time.Duration(20+r.IntN(80)) * time.Millisecond) // between bursts
+					} else {
+						w.Sleep(time.Duration(r.IntN(15)) * time.Millisecond)
+					}
 				}
 			})
 		}
@@ -234,7 +244,10 @@ func concurrentHarness(h *dsttest.Harness, consumers int, expect ...string) {
 						h.Fail(err)
 						return
 					}
-					if r.IntN(4) == 0 {
+					switch {
+					case lagging && h.Phase() == dsttest.Faulty: // catching up in recovery
+						w.Sleep(time.Duration(r.IntN(60)) * time.Millisecond)
+					case r.IntN(4) == 0:
 						w.Sleep(time.Duration(r.IntN(20)) * time.Millisecond)
 					}
 				}
@@ -243,7 +256,11 @@ func concurrentHarness(h *dsttest.Harness, consumers int, expect ...string) {
 		// Clean closes and reopens while producers and consumers run.
 		r := w.Rand()
 		for h.Phase() == dsttest.Faulty {
-			w.Sleep(time.Duration(200+r.IntN(800)) * time.Millisecond)
+			if frequent {
+				w.Sleep(time.Duration(20+r.IntN(180)) * time.Millisecond)
+			} else {
+				w.Sleep(time.Duration(200+r.IntN(800)) * time.Millisecond)
+			}
 			if h.Phase() != dsttest.Faulty {
 				break
 			}
