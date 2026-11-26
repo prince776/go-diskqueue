@@ -436,7 +436,15 @@ func (d *diskQueue) writeOne(data []byte) error {
 
 	if d.writeFile == nil {
 		curFileName := d.fileName(d.writeFileNum)
-		d.writeFile, err = os.OpenFile(curFileName, os.O_RDWR|os.O_CREATE, 0600)
+		flag := os.O_RDWR | os.O_CREATE
+		if d.writePos == 0 {
+			// Starting a file: anything already in it was left by a run
+			// that crashed before its metadata covered it. Writing over it
+			// in place would leave that run's tail after what we write,
+			// where the reader would take it for corruption.
+			flag |= os.O_TRUNC
+		}
+		d.writeFile, err = os.OpenFile(curFileName, flag, 0600)
 		if err != nil {
 			return err
 		}
