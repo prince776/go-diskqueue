@@ -98,7 +98,7 @@ func TestDiskQueue(t *testing.T) {
 	Nil(t, err)
 	Equal(t, int64(1), dq.Depth())
 
-	msgOut := <-dq.ReadChan()
+	msgOut := <-dq.ReadChan().Raw()
 	Equal(t, msg, msgOut)
 }
 
@@ -127,7 +127,7 @@ func TestDiskQueueRoll(t *testing.T) {
 	Equal(t, int64(ml+4), dq.(*diskQueue).writePos)
 
 	for i := 11; i > 0; i-- {
-		Equal(t, msg, <-dq.ReadChan())
+		Equal(t, msg, <-dq.ReadChan().Raw())
 		Equal(t, int64(i-1), dq.Depth())
 	}
 }
@@ -155,10 +155,10 @@ func TestDiskQueuePeek(t *testing.T) {
 		}
 
 		for i := 10; i > 0; i-- {
-			Equal(t, msg, <-dq.PeekChan())
+			Equal(t, msg, <-dq.PeekChan().Raw())
 			Equal(t, int64(i), dq.Depth())
 
-			Equal(t, msg, <-dq.ReadChan())
+			Equal(t, msg, <-dq.ReadChan().Raw())
 			Equal(t, int64(i-1), dq.Depth())
 		}
 
@@ -173,13 +173,13 @@ func TestDiskQueuePeek(t *testing.T) {
 		}
 
 		for i := 10; i > 0; i-- {
-			Equal(t, msg, <-dq.PeekChan())
+			Equal(t, msg, <-dq.PeekChan().Raw())
 			Equal(t, int64(i), dq.Depth())
 
-			Equal(t, msg, <-dq.PeekChan())
+			Equal(t, msg, <-dq.PeekChan().Raw())
 			Equal(t, int64(i), dq.Depth())
 
-			Equal(t, msg, <-dq.ReadChan())
+			Equal(t, msg, <-dq.ReadChan().Raw())
 			Equal(t, int64(i-1), dq.Depth())
 		}
 
@@ -194,13 +194,13 @@ func TestDiskQueuePeek(t *testing.T) {
 		}
 
 		for i := 10; i > 1; i-- {
-			Equal(t, msg, <-dq.PeekChan())
+			Equal(t, msg, <-dq.PeekChan().Raw())
 			Equal(t, int64(i), dq.Depth())
 
-			Equal(t, msg, <-dq.ReadChan())
+			Equal(t, msg, <-dq.ReadChan().Raw())
 			Equal(t, int64(i-1), dq.Depth())
 
-			Equal(t, msg, <-dq.PeekChan())
+			Equal(t, msg, <-dq.PeekChan().Raw())
 			Equal(t, int64(i-1), dq.Depth())
 		}
 
@@ -236,7 +236,7 @@ func TestDiskQueueEmpty(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		<-dq.ReadChan()
+		<-dq.ReadChan().Raw()
 	}
 
 	for {
@@ -250,9 +250,9 @@ func TestDiskQueueEmpty(t *testing.T) {
 	numFiles := dq.(*diskQueue).writeFileNum
 	dq.Empty()
 
-	assertFileNotExist(t, dq.(*diskQueue).metaDataFileName())
+	assertFileNotExist(t, filepath.Join(tmpDir, dq.(*diskQueue).metaDataFileName()))
 	for i := int64(0); i <= numFiles; i++ {
-		assertFileNotExist(t, dq.(*diskQueue).fileName(i))
+		assertFileNotExist(t, filepath.Join(tmpDir, dq.(*diskQueue).fileName(i)))
 	}
 	Equal(t, int64(0), dq.Depth())
 	Equal(t, dq.(*diskQueue).writeFileNum, dq.(*diskQueue).readFileNum)
@@ -267,7 +267,7 @@ func TestDiskQueueEmpty(t *testing.T) {
 	}
 
 	for i := 0; i < 100; i++ {
-		<-dq.ReadChan()
+		<-dq.ReadChan().Raw()
 	}
 
 	for {
@@ -307,24 +307,24 @@ func TestDiskQueueCorruption(t *testing.T) {
 	Equal(t, int64(25), dq.Depth())
 
 	// corrupt the 2nd file
-	dqFn := dq.(*diskQueue).fileName(1)
+	dqFn := filepath.Join(tmpDir, dq.(*diskQueue).fileName(1))
 	os.Truncate(dqFn, 400) // 3 valid messages, 5 corrupted
 
 	// corrupt the 4th (current) file
-	dqFn = dq.(*diskQueue).fileName(3)
+	dqFn = filepath.Join(tmpDir, dq.(*diskQueue).fileName(3))
 	os.Truncate(dqFn, 100)
 
 	for i := 0; i < 18; i++ {
-		Equal(t, msg, <-dq.ReadChan())
+		Equal(t, msg, <-dq.ReadChan().Raw())
 	}
 	Equal(t, int64(7), dq.Depth())
 
-	Equal(t, msg, <-dq.ReadChan())
+	Equal(t, msg, <-dq.ReadChan().Raw())
 	Equal(t, int64(0), dq.Depth())
 
 	dq.Put(msg) // in 5th file
 
-	Equal(t, msg, <-dq.ReadChan())
+	Equal(t, msg, <-dq.ReadChan().Raw())
 	Equal(t, int64(0), dq.Depth())
 
 	// write a corrupt (len 0) message at the 5th (current) file
@@ -334,19 +334,19 @@ func TestDiskQueueCorruption(t *testing.T) {
 	dq.Put(msg)
 	dq.Put(msg)
 
-	Equal(t, msg, <-dq.ReadChan())
+	Equal(t, msg, <-dq.ReadChan().Raw())
 
 	dq.Put(msg)
 	dq.Put(msg)
 
 	// corrupt the last file
-	dqFn = dq.(*diskQueue).fileName(5)
+	dqFn = filepath.Join(tmpDir, dq.(*diskQueue).fileName(5))
 	os.Truncate(dqFn, 100)
 
 	Equal(t, int64(2), dq.Depth())
 
 	// return one message and try reading again from corrupted file
-	Equal(t, msg, <-dq.ReadChan())
+	Equal(t, msg, <-dq.ReadChan().Raw())
 
 	// give diskqueue time to handle read error
 	time.Sleep(50 * time.Millisecond)
@@ -403,7 +403,7 @@ func TestDiskQueueSyncAfterRead(t *testing.T) {
 	dq.Put(msg)
 
 	for i := 0; i < 10; i++ {
-		d := readMetaDataFile(dq.(*diskQueue).metaDataFileName(), 0)
+		d := readMetaDataFile(filepath.Join(tmpDir, dq.(*diskQueue).metaDataFileName()), 0)
 		if d.depth == 1 &&
 			d.readFileNum == 0 &&
 			d.writeFileNum == 0 &&
@@ -418,10 +418,10 @@ func TestDiskQueueSyncAfterRead(t *testing.T) {
 
 next:
 	dq.Put(msg)
-	<-dq.ReadChan()
+	<-dq.ReadChan().Raw()
 
 	for i := 0; i < 10; i++ {
-		d := readMetaDataFile(dq.(*diskQueue).metaDataFileName(), 0)
+		d := readMetaDataFile(filepath.Join(tmpDir, dq.(*diskQueue).metaDataFileName()), 0)
 		if d.depth == 1 &&
 			d.readFileNum == 0 &&
 			d.writeFileNum == 0 &&
@@ -501,7 +501,7 @@ func TestDiskQueueTorture(t *testing.T) {
 			for {
 				time.Sleep(100000 * time.Nanosecond)
 				select {
-				case m := <-dq.ReadChan():
+				case m := <-dq.ReadChan().Raw():
 					Equal(t, m, msg)
 					atomic.AddInt64(&read, 1)
 				case <-readExitChan:
@@ -563,11 +563,11 @@ func TestDiskQueueResize(t *testing.T) {
 
 	for i := 0; i < 9; i++ {
 		msg[0] = byte(i)
-		Equal(t, msg, <-dq.ReadChan())
+		Equal(t, msg, <-dq.ReadChan().Raw())
 	}
 	for i := 0; i < 10; i++ {
 		msg[0] = byte(20 + i)
-		Equal(t, msg, <-dq.ReadChan())
+		Equal(t, msg, <-dq.ReadChan().Raw())
 	}
 	Equal(t, int64(0), dq.Depth())
 	dq.Close()
@@ -778,7 +778,7 @@ func benchmarkDiskQueueGet(size int64, b *testing.B) {
 	b.StartTimer()
 
 	for i := 0; i < b.N; i++ {
-		<-dq.ReadChan()
+		<-dq.ReadChan().Raw()
 	}
 }
 
@@ -802,7 +802,7 @@ func TestDiskQueueRollAsync(t *testing.T) {
 		Nil(t, err)
 		Equal(t, int64(1), dq.Depth())
 
-		Equal(t, msg, <-dq.ReadChan())
+		Equal(t, msg, <-dq.ReadChan().Raw())
 		Equal(t, int64(0), dq.Depth())
 	}
 
@@ -835,7 +835,7 @@ func TestWriteRollReadEOF(t *testing.T) {
 		msg := []byte(fmt.Sprintf("%05d", i)) // 5 bytes
 		err = dq.Put(msg)
 
-		msgOut := <-dq.ReadChan()
+		msgOut := <-dq.ReadChan().Raw()
 		Equal(t, msg, msgOut)
 	}
 

@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"io/fs"
 	"os"
 	"path"
-	"sync"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 // logging stuff copied from github.com/nsqio/nsq/internal/lg
@@ -46,8 +48,10 @@ func (l LogLevel) String() string {
 
 type Interface interface {
 	Put([]byte) error
-	ReadChan() <-chan []byte // this is expected to be an *unbuffered* channel
-	PeekChan() <-chan []byte // this is expected to be an *unbuffered* channel
+	// ReadChan and PeekChan are unbuffered. In the real World, Raw() gives
+	// the native channel (to select on with other channels).
+	ReadChan() dst.Chan[[]byte]
+	PeekChan() dst.Chan[[]byte]
 	Close() error
 	Delete() error
 	Depth() int64
@@ -65,7 +69,15 @@ type diskQueue struct {
 	writeFileNum int64
 	depth        int64
 
-	sync.RWMutex
+	dst.RWMutex
+
+	w    *dst.World
+	fsys dst.FS
+
+	// onSync, if set, is called after each successful sync: everything
+	// written before it is durable, and so is every read position
+	// advanced before it.
+	onSync func()
 
 	// instantiation time metadata
 	name                string
@@ -84,25 +96,25 @@ type diskQueue struct {
 	nextReadPos     int64
 	nextReadFileNum int64
 
-	readFile  *os.File
-	writeFile *os.File
+	readFile  dst.File
+	writeFile dst.File
 	reader    *bufio.Reader
 	writeBuf  bytes.Buffer
 
 	// exposed via ReadChan()
-	readChan chan []byte
+	readChan dst.Chan[[]byte]
 
 	// exposed via PeekChan()
-	peekChan chan []byte
+	peekChan dst.Chan[[]byte]
 
 	// internal channels
-	depthChan         chan int64
-	writeChan         chan []byte
-	writeResponseChan chan error
-	emptyChan         chan int
-	emptyResponseChan chan error
-	exitChan          chan int
-	exitSyncChan      chan int
+	depthChan         dst.Chan[int64]
+	writeChan         dst.Chan[[]byte]
+	writeResponseChan dst.Chan[error]
+	emptyChan         dst.Chan[int]
+	emptyResponseChan dst.Chan[error]
+	exitChan          dst.Chan[int]
+	exitSyncChan      dst.Chan[int]
 
 	logf AppLogFunc
 }
@@ -112,21 +124,41 @@ type diskQueue struct {
 func New(name string, dataPath string, maxBytesPerFile int64,
 	minMsgSize int32, maxMsgSize int32,
 	syncEvery int64, syncTimeout time.Duration, logf AppLogFunc) Interface {
+	w := realworld.New(realworld.Options{Dir: dataPath})
+	return NewWorld(w, Options{}, name, ".", maxBytesPerFile, minMsgSize, maxMsgSize, syncEvery, syncTimeout, logf)
+}
+
+// Options are NewWorld's optional settings.
+type Options struct {
+	// OnSync, if set, is called (on the queue's I/O goroutine) after each
+	// successful sync: every message written before it is durable, and
+	// so is every read position advanced before it.
+	OnSync func()
+}
+
+// NewWorld is New for a World: the queue's goroutine, channels, timers
+// and files are w's, and dataPath is relative to w's filesystem.
+func NewWorld(w *dst.World, opts Options, name string, dataPath string, maxBytesPerFile int64,
+	minMsgSize int32, maxMsgSize int32,
+	syncEvery int64, syncTimeout time.Duration, logf AppLogFunc) Interface {
 	d := diskQueue{
+		w:                 w,
+		fsys:              w.FS(),
+		onSync:            opts.OnSync,
 		name:              name,
 		dataPath:          dataPath,
 		maxBytesPerFile:   maxBytesPerFile,
 		minMsgSize:        minMsgSize,
 		maxMsgSize:        maxMsgSize,
-		readChan:          make(chan []byte),
-		peekChan:          make(chan []byte),
-		depthChan:         make(chan int64),
-		writeChan:         make(chan []byte),
-		writeResponseChan: make(chan error),
-		emptyChan:         make(chan int),
-		emptyResponseChan: make(chan error),
-		exitChan:          make(chan int),
-		exitSyncChan:      make(chan int),
+		readChan:          dst.MakeChan[[]byte](w, 0),
+		peekChan:          dst.MakeChan[[]byte](w, 0),
+		depthChan:         dst.MakeChan[int64](w, 0),
+		writeChan:         dst.MakeChan[[]byte](w, 0),
+		writeResponseChan: dst.MakeChan[error](w, 0),
+		emptyChan:         dst.MakeChan[int](w, 0),
+		emptyResponseChan: dst.MakeChan[error](w, 0),
+		exitChan:          dst.MakeChan[int](w, 0),
+		exitSyncChan:      dst.MakeChan[int](w, 0),
 		syncEvery:         syncEvery,
 		syncTimeout:       syncTimeout,
 		logf:              logf,
@@ -134,17 +166,17 @@ func New(name string, dataPath string, maxBytesPerFile int64,
 
 	// no need to lock here, nothing else could possibly be touching this instance
 	err := d.retrieveMetaData()
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		d.logf(ERROR, "DISKQUEUE(%s) failed to retrieveMetaData - %s", d.name, err)
 	}
 
-	go d.ioLoop()
+	w.Go(d.ioLoop)
 	return &d
 }
 
 // Depth returns the depth of the queue
 func (d *diskQueue) Depth() int64 {
-	depth, ok := <-d.depthChan
+	depth, ok := d.depthChan.Recv()
 	if !ok {
 		// ioLoop exited
 		depth = d.depth
@@ -153,11 +185,11 @@ func (d *diskQueue) Depth() int64 {
 }
 
 // ReadChan returns the receive-only []byte channel for reading data
-func (d *diskQueue) ReadChan() <-chan []byte {
+func (d *diskQueue) ReadChan() dst.Chan[[]byte] {
 	return d.readChan
 }
 
-func (d *diskQueue) PeekChan() <-chan []byte {
+func (d *diskQueue) PeekChan() dst.Chan[[]byte] {
 	return d.peekChan
 }
 
@@ -170,8 +202,9 @@ func (d *diskQueue) Put(data []byte) error {
 		return errors.New("exiting")
 	}
 
-	d.writeChan <- data
-	return <-d.writeResponseChan
+	d.writeChan.Send(data)
+	err, _ := d.writeResponseChan.Recv()
+	return err
 }
 
 // Close cleans up the queue and persists metadata
@@ -199,11 +232,11 @@ func (d *diskQueue) exit(deleted bool) error {
 		d.logf(INFO, "DISKQUEUE(%s): closing", d.name)
 	}
 
-	close(d.exitChan)
+	d.exitChan.Close()
 	// ensure that ioLoop has exited
-	<-d.exitSyncChan
+	d.exitSyncChan.Recv()
 
-	close(d.depthChan)
+	d.depthChan.Close()
 
 	if d.readFile != nil {
 		d.readFile.Close()
@@ -230,15 +263,16 @@ func (d *diskQueue) Empty() error {
 
 	d.logf(INFO, "DISKQUEUE(%s): emptying", d.name)
 
-	d.emptyChan <- 1
-	return <-d.emptyResponseChan
+	d.emptyChan.Send(1)
+	err, _ := d.emptyResponseChan.Recv()
+	return err
 }
 
 func (d *diskQueue) deleteAllFiles() error {
 	err := d.skipToNextRWFile()
 
-	innerErr := os.Remove(d.metaDataFileName())
-	if innerErr != nil && !os.IsNotExist(innerErr) {
+	innerErr := d.fsys.Remove(d.metaDataFileName())
+	if innerErr != nil && !errors.Is(innerErr, fs.ErrNotExist) {
 		d.logf(ERROR, "DISKQUEUE(%s) failed to remove metadata file - %s", d.name, innerErr)
 		return innerErr
 	}
@@ -261,8 +295,8 @@ func (d *diskQueue) skipToNextRWFile() error {
 
 	for i := d.readFileNum; i <= d.writeFileNum; i++ {
 		fn := d.fileName(i)
-		innerErr := os.Remove(fn)
-		if innerErr != nil && !os.IsNotExist(innerErr) {
+		innerErr := d.fsys.Remove(fn)
+		if innerErr != nil && !errors.Is(innerErr, fs.ErrNotExist) {
 			d.logf(ERROR, "DISKQUEUE(%s) failed to remove data file - %s", d.name, innerErr)
 			err = innerErr
 		}
@@ -287,7 +321,7 @@ func (d *diskQueue) readOne() ([]byte, error) {
 
 	if d.readFile == nil {
 		curFileName := d.fileName(d.readFileNum)
-		d.readFile, err = os.OpenFile(curFileName, os.O_RDONLY, 0600)
+		d.readFile, err = d.fsys.OpenFile(curFileName, os.O_RDONLY, 0600)
 		if err != nil {
 			return nil, err
 		}
@@ -397,7 +431,7 @@ func (d *diskQueue) writeOne(data []byte) error {
 
 	if d.writeFile == nil {
 		curFileName := d.fileName(d.writeFileNum)
-		d.writeFile, err = os.OpenFile(curFileName, os.O_RDWR|os.O_CREATE, 0600)
+		d.writeFile, err = d.fsys.OpenFile(curFileName, os.O_RDWR|os.O_CREATE, 0600)
 		if err != nil {
 			return err
 		}
@@ -456,16 +490,19 @@ func (d *diskQueue) sync() error {
 	}
 
 	d.needSync = false
+	if d.onSync != nil {
+		d.onSync()
+	}
 	return nil
 }
 
 // retrieveMetaData initializes state from the filesystem
 func (d *diskQueue) retrieveMetaData() error {
-	var f *os.File
+	var f dst.File
 	var err error
 
 	fileName := d.metaDataFileName()
-	f, err = os.OpenFile(fileName, os.O_RDONLY, 0600)
+	f, err = d.fsys.OpenFile(fileName, os.O_RDONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -489,7 +526,7 @@ func (d *diskQueue) retrieveMetaData() error {
 	// writes, and let the reader salvage what it can from the messages in the
 	// diskqueue beyond the metadata's likely also stale readPos
 	fileName = d.fileName(d.writeFileNum)
-	fileInfo, err := os.Stat(fileName)
+	fileInfo, err := d.fsys.Stat(fileName)
 	if err != nil {
 		return err
 	}
@@ -511,14 +548,14 @@ func (d *diskQueue) retrieveMetaData() error {
 
 // persistMetaData atomically writes state to the filesystem
 func (d *diskQueue) persistMetaData() error {
-	var f *os.File
+	var f dst.File
 	var err error
 
 	fileName := d.metaDataFileName()
-	tmpFileName := fmt.Sprintf("%s.%d.tmp", fileName, rand.Int())
+	tmpFileName := fmt.Sprintf("%s.%d.tmp", fileName, d.w.Rand().Int())
 
 	// write to tmp file
-	f, err = os.OpenFile(tmpFileName, os.O_RDWR|os.O_CREATE, 0600)
+	f, err = d.fsys.OpenFile(tmpFileName, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}
@@ -535,7 +572,7 @@ func (d *diskQueue) persistMetaData() error {
 	f.Close()
 
 	// atomically rename
-	return os.Rename(tmpFileName, fileName)
+	return d.fsys.Rename(tmpFileName, fileName)
 }
 
 func (d *diskQueue) metaDataFileName() string {
@@ -598,7 +635,7 @@ func (d *diskQueue) moveForward() {
 		d.needSync = true
 
 		fn := d.fileName(oldReadFileNum)
-		err := os.Remove(fn)
+		err := d.fsys.Remove(fn)
 		if err != nil {
 			d.logf(ERROR, "DISKQUEUE(%s) failed to Remove(%s) - %s", d.name, fn, err)
 		}
@@ -627,7 +664,7 @@ func (d *diskQueue) handleReadError() {
 		"DISKQUEUE(%s) jump to next file and saving bad file as %s",
 		d.name, badRenameFn)
 
-	err := os.Rename(badFn, badRenameFn)
+	err := d.fsys.Rename(badFn, badRenameFn)
 	if err != nil {
 		d.logf(ERROR,
 			"DISKQUEUE(%s) failed to rename bad diskqueue file %s to %s",
@@ -657,10 +694,10 @@ func (d *diskQueue) ioLoop() {
 	var dataRead []byte
 	var err error
 	var count int64
-	var r chan []byte
-	var p chan []byte
+	var r dst.Chan[[]byte]
+	var p dst.Chan[[]byte]
 
-	syncTicker := time.NewTicker(d.syncTimeout)
+	syncTicker := d.w.NewTicker(d.syncTimeout)
 
 	for {
 		// dont sync all the time :)
@@ -689,38 +726,44 @@ func (d *diskQueue) ioLoop() {
 			r = d.readChan
 			p = d.peekChan
 		} else {
-			r = nil
-			p = nil
+			r = dst.Chan[[]byte]{}
+			p = dst.Chan[[]byte]{}
 		}
 
-		select {
-		// the Go channel spec dictates that nil channel operations (read or write)
-		// in a select are skipped, we set r to d.readChan only when there is data to read
-		case p <- dataRead:
-		case r <- dataRead:
-			count++
-			// moveForward sets needSync flag if a file is removed
-			d.moveForward()
-		case d.depthChan <- d.depth:
-		case <-d.emptyChan:
-			d.emptyResponseChan <- d.deleteAllFiles()
-			count = 0
-		case dataWrite := <-d.writeChan:
-			count++
-			d.writeResponseChan <- d.writeOne(dataWrite)
-		case <-syncTicker.C:
-			if count == 0 {
-				// avoid sync when there's no activity
-				continue
-			}
-			d.needSync = true
-		case <-d.exitChan:
-			goto exit
+		exit := false
+		dst.Select(d.w,
+			// nil channel operations in a select are skipped: r is d.readChan
+			// only when there is data to read
+			dst.OnSend(p, dataRead, nil),
+			dst.OnSend(r, dataRead, func() {
+				count++
+				// moveForward sets needSync flag if a file is removed
+				d.moveForward()
+			}),
+			dst.OnSend(d.depthChan, d.depth, nil),
+			dst.OnRecv(d.emptyChan, func(int, bool) {
+				d.emptyResponseChan.Send(d.deleteAllFiles())
+				count = 0
+			}),
+			dst.OnRecv(d.writeChan, func(dataWrite []byte, _ bool) {
+				count++
+				d.writeResponseChan.Send(d.writeOne(dataWrite))
+			}),
+			dst.OnRecv(syncTicker.C, func(time.Time, bool) {
+				if count == 0 {
+					// avoid sync when there's no activity
+					return
+				}
+				d.needSync = true
+			}),
+			dst.OnRecv(d.exitChan, func(int, bool) { exit = true }),
+		)
+		if exit {
+			break
 		}
 	}
 
-exit:
 	d.logf(INFO, "DISKQUEUE(%s): closing ... ioLoop", d.name)
 	syncTicker.Stop()
-	d.exitSyncChan <- 1
+	d.exitSyncChan.Send(1)
 }
