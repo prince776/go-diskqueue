@@ -169,6 +169,9 @@ func NewWorld(w *dst.World, opts Options, name string, dataPath string, maxBytes
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		d.logf(ERROR, "DISKQUEUE(%s) failed to retrieveMetaData - %s", d.name, err)
 	}
+	if _, err := d.fsys.Stat(d.metaDataFileName()); errors.Is(err, fs.ErrNotExist) {
+		d.setAsideUnsyncedData()
+	}
 
 	w.Go(d.ioLoop)
 	return &d
@@ -314,6 +317,22 @@ func (d *diskQueue) skipToNextRWFile() error {
 	d.depth = 0
 
 	return err
+}
+
+// setAsideUnsyncedData handles a data file without metadata: one left by
+// a crash before the queue's first sync. Nothing in it was promised durable,
+// and writing over it in place would leave its stale tail where the reader
+// (reading ahead) would take it for corruption: it is set aside as bad.
+func (d *diskQueue) setAsideUnsyncedData() {
+	fn := d.fileName(0)
+	fi, err := d.fsys.Stat(fn)
+	if err != nil || fi.Size() == 0 {
+		return
+	}
+	d.logf(WARN, "DISKQUEUE(%s) %s has data but there is no metadata, saving it as %s.bad", d.name, fn, fn)
+	if err := d.fsys.Rename(fn, fn+".bad"); err != nil {
+		d.logf(ERROR, "DISKQUEUE(%s) failed to rename %s - %s", d.name, fn, err)
+	}
 }
 
 // readOne performs a low level filesystem read for a single []byte
