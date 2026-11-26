@@ -117,6 +117,17 @@ being told where to look.
 Also seen: after crash recovery, `Depth()` counts only what the synced
 metadata knew of, so it under-reports until the queue is drained.
 
+## Benchmark
+
+The five bugs can be re-inserted one at a time (build tag `dstbugs`,
+`DSTBUG=<name>`), and `dstbench.json` lists them with the sweeps that
+should catch each, for go-dst-kit's `dstbench` (bug 5 held out).
+Baseline, 300 seeds per sweep: `rename-without-dir-sync` 45% of seeds,
+`close-without-fsync` 9.3% (the concurrent sweep: 0%),
+`reuse-file-without-metadata` 0.3% (concurrent: 0%), and
+`read-past-rolled-file` 4% (concurrent: 100%). With each bug re-inserted,
+its sweep first fails at the seed that originally found it.
+
 ## Branches
 
 - `master`: the go-dst-kit migration, the fixes and the DST tests.
