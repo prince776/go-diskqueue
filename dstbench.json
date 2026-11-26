@@ -2,12 +2,60 @@
   "package": ".",
   "tags": "dstbugs",
   "env": "DSTBUG",
-  "baseline": ["TestDSTNoFaults", "TestDSTCrashes", "TestDSTConcurrentNoFaults", "TestDSTConcurrentCrashes", "TestDSTProducersPeekNoFaults", "TestDSTProducersPeekCrashes"],
+  "baseline": [
+    "TestDSTNoFaults",
+    "TestDSTCrashes",
+    "TestDSTConcurrentNoFaults",
+    "TestDSTConcurrentCrashes",
+    "TestDSTProducersPeekNoFaults",
+    "TestDSTProducersPeekCrashes",
+    "TestDSTConcurrentFixedPace"
+  ],
   "bugs": [
-    {"name": "rename-without-dir-sync", "tests": ["TestDSTCrashes", "TestDSTConcurrentCrashes"], "note": "bug 1"},
-    {"name": "close-without-fsync", "tests": ["TestDSTCrashes", "TestDSTConcurrentCrashes"], "reached": "clean close and reopen", "note": "bug 2"},
-    {"name": "reuse-file-without-metadata", "tests": ["TestDSTCrashes", "TestDSTConcurrentCrashes"], "reached": "restarted after a crash", "note": "bug 3"},
-    {"name": "read-past-rolled-file", "tests": ["TestDSTNoFaults", "TestDSTConcurrentNoFaults"], "note": "bug 4 (upstream #38)"},
-    {"name": "reuse-file-after-read-error", "tests": ["TestDSTCrashes", "TestDSTConcurrentCrashes"], "reached": "restarted after a crash", "held_out": true, "note": "bug 5"}
+    {
+      "name": "rename-without-dir-sync",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTConcurrentCrashes"
+      ],
+      "note": "bug 1"
+    },
+    {
+      "name": "close-without-fsync",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTConcurrentCrashes"
+      ],
+      "reached": "clean close and reopen",
+      "note": "bug 2"
+    },
+    {
+      "name": "reuse-file-without-metadata",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTConcurrentCrashes"
+      ],
+      "reached": "restarted after a crash",
+      "note": "bug 3"
+    },
+    {
+      "name": "read-past-rolled-file",
+      "tests": [
+        "TestDSTNoFaults",
+        "TestDSTConcurrentNoFaults",
+        "TestDSTConcurrentFixedPace"
+      ],
+      "note": "bug 4 (upstream #38)"
+    },
+    {
+      "name": "reuse-file-after-read-error",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTConcurrentCrashes"
+      ],
+      "reached": "restarted after a crash",
+      "held_out": true,
+      "note": "bug 5"
+    }
   ]
 }

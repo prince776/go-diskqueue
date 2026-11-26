@@ -329,3 +329,14 @@ func TestDSTProducersPeekCrashes(t *testing.T) {
 		concurrentHarness(h, 1, "peeked", "restarted after a crash")
 	})
 }
+
+// TestDSTConcurrentFixedPace: TestDSTConcurrentNoFaults at the original,
+// fixed pace (every workload feature off), a floor under the bugs the pace
+// features make rarer (lagging consumers hide the #38 bug).
+func TestDSTConcurrentFixedPace(t *testing.T) {
+	strictFiles = true
+	defer func() { strictFiles = false }()
+	o := opts(dsttest.Faults{})
+	o.Features = map[string]bool{"*": false}
+	dsttest.Run(t, o, func(h *dsttest.Harness) { concurrentHarness(h, 2) })
+}
