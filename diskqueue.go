@@ -137,6 +137,9 @@ func New(name string, dataPath string, maxBytesPerFile int64,
 	if err != nil && !os.IsNotExist(err) {
 		d.logf(ERROR, "DISKQUEUE(%s) failed to retrieveMetaData - %s", d.name, err)
 	}
+	if _, err := os.Stat(d.metaDataFileName()); os.IsNotExist(err) {
+		d.setAsideUnsyncedData()
+	}
 
 	go d.ioLoop()
 	return &d
@@ -232,6 +235,22 @@ func (d *diskQueue) Empty() error {
 
 	d.emptyChan <- 1
 	return <-d.emptyResponseChan
+}
+
+// setAsideUnsyncedData handles a data file without metadata: one left by
+// a crash before the queue's first sync. Nothing in it was promised durable,
+// and writing over it in place would leave its stale tail where the reader
+// (reading ahead) would take it for corruption: it is set aside as bad.
+func (d *diskQueue) setAsideUnsyncedData() {
+	fn := d.fileName(0)
+	fi, err := os.Stat(fn)
+	if err != nil || fi.Size() == 0 {
+		return
+	}
+	d.logf(WARN, "DISKQUEUE(%s) %s has data but there is no metadata, saving it as %s.bad", d.name, fn, fn)
+	if err := os.Rename(fn, fn+".bad"); err != nil {
+		d.logf(ERROR, "DISKQUEUE(%s) failed to rename %s - %s", d.name, fn, err)
+	}
 }
 
 func (d *diskQueue) deleteAllFiles() error {
