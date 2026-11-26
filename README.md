@@ -76,6 +76,10 @@ survives crashes) and checks every delivery against the contract.
 - `TestDSTNoFaults` explores goroutine scheduling only.
 - `TestDSTCrashes` adds process crashes with power loss (unsynced writes
   lost), torn writes, and power loss inside I/O calls.
+- `TestDSTConcurrent*` run two producers and two consumers at once, with
+  clean reopens; `TestDSTProducersPeek*` two producers and one consumer
+  that also peeks (exact checks on gaps and peeks need one consumer: with
+  two, the order of handoffs isn't observable).
 
 ```sh
 go test -run TestDST                                   # 300 seeds each, a few seconds
@@ -88,8 +92,9 @@ whole suite passes with `-race`.
 
 ## Bugs found
 
-Each was fixed in its own commit, and each is caught again if its fix is
-reverted.
+Bugs 1 to 4 were each fixed in their own commit, and each is caught again
+if its fix is reverted. Bug 5 is reported, not fixed yet (the fix: truncate
+a file the writer starts at offset 0).
 
 | # | Bug | Effect | Found by |
 |---|---|---|---|
@@ -97,6 +102,7 @@ reverted.
 | 2 | `Close` persisted metadata without fsyncing the data it covers | power loss soon after a clean shutdown loses acknowledged messages | crash sweep, seed 32 |
 | 3 | A data file left by a crash before the first sync was reused in place | after restart, the reader parses the old run's leftover bytes, declares the file corrupt, and acknowledged messages are lost | crash sweep, seed 236 |
 | 4 | Reading past the end of a file the writer just rolled away from ([#38](https://github.com/nsqio/go-diskqueue/issues/38)) | a false corruption report and a `.bad` file; nothing lost | no-fault sweep, seed 18 |
+| 5 | **Open.** After a read error the writer moves to the next file number at offset 0, writing over a file a crashed run left there | the reader takes the old run's torn tail for corruption and sets the file aside: an acked, synced message is lost (bug 3's mechanism, by another path) | concurrent crash sweep, seed 4741809724240498 (two crashes in a row) |
 
 **Bug 3 needs no power loss.** Any crash (a panic, an OOM kill) in a new
 queue's first sync interval (by default its first 2 seconds or 2,500
@@ -123,9 +129,7 @@ metadata knew of, so it under-reports until the queue is drained.
 
 - Corruption of data already on disk (bit rot): the queue has no
   checksums, so a flipped bit is delivered as a real message.
-- Several producers or consumers at once (the workload is one goroutine).
-- `PeekChan`.
-- `Depth()` after a crash.
+- `Depth()` after a crash (checked only for runs without one).
 
 ---
 
